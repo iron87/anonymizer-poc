@@ -1,0 +1,27 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: anonymizer-poc-app
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - DEFAULT_OLLAMA_MODEL=llama3.2:latest
+      - HOST=0.0.0.0
+      - PORT=9000
+    ports:
+      - "9000:9000"
+
+  plano:
+    image: ghcr.io/katanemo/plano:latest
+    container_name: anonymizer-poc-plano
+    environment:
+      - PLANO_CONFIG_FILE=/app/plano_config.yaml
+    volumes:
+      - ./config/plano.yaml:/app/plano_config.yaml:ro
+    ports:
+      - "12000:12000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - app

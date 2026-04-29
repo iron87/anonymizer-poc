@@ -1,0 +1,27 @@
+version: v0.4.0
+
+filters:
+  - id: pii_anonymizer
+    url: http://host.docker.internal:9000/anonymize
+    type: http
+  - id: pii_deanonymizer
+    url: http://host.docker.internal:9000/deanonymize
+    type: http
+
+model_providers:
+  - model: local/llama3.2
+    provider_interface: openai
+    base_url: http://host.docker.internal:11434
+    default: true
+
+listeners:
+  - type: model
+    name: llm_gateway
+    port: 12000
+    input_filters:
+      - pii_anonymizer
+    output_filters:
+      - pii_deanonymizer
+
+tracing:
+  random_sampling: 100
