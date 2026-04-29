@@ -1,120 +1,117 @@
 # Anonymizer PoC for LLM Calls (Plano + Ollama)
 
-A sample repository showing how to anonymize sensitive data before LLM calls,
-with reversible deanonymization of the final response.
+A PoC that anonymizes PII before LLM calls and deanonymizes placeholders in the
+final response.
 
-Pipeline:
+Current architecture:
 
-1. User input containing PII
-2. Anonymization (LLM Guard + Vault)
-3. Local LLM call via Ollama
-4. Deanonymization of the output
+1. Client sends a request to Plano (`:12000`)
+2. Plano input filter calls FastAPI `/anonymize/{path}`
+3. Plano forwards the sanitized request to Ollama
+4. Plano output filter calls FastAPI `/deanonymize/{path}`
+5. Client receives restored output
 
-Includes an extra comparison endpoint using Microsoft Presidio.
+FastAPI also exposes direct endpoints (`/v1/*`) for standalone testing.
 
 ## Stack
 
-- FastAPI web server
-- [LLM Guard](https://github.com/protectai/llm-guard) for reversible anonymize/deanonymize
-- [Microsoft Presidio](https://github.com/microsoft/presidio) for de-identification comparison
-- [Ollama](https://github.com/ollama/ollama) for local LLM inference
-- [Plano](https://github.com/katanemo/plano) for agent orchestration and proxy
+- FastAPI
+- Microsoft Presidio (`presidio-analyzer`, `presidio-anonymizer`)
+- spaCy `en_core_web_sm`
+- Ollama (`llama3.2:latest`)
+- Plano model listener with HTTP input/output filters
 
-## Project structure
+## Project Structure
 
-- `src/api/main.py`: main API endpoints
-- `src/common/vault_store.py`: session management and vault for deanonymization
-- `src/common/ollama_client.py`: local Ollama HTTP client
-- `config/plano.yaml`: Plano listener/agent configuration
-- `scripts/demo.sh`: end-to-end demo curl calls
+- `src/api/main.py`: API and filter endpoints
+- `src/common/vault_store.py`: in-memory session vault (placeholder <-> original)
+- `src/common/ollama_client.py`: Ollama HTTP client
+- `config/plano.yaml`: Plano model-listener config
+- `scripts/demo.sh`: direct FastAPI demo
+- `scripts/run_api.sh`: run FastAPI locally
+- `scripts/run_plano.sh`: run Plano locally (`planoai` required)
 
 ## Prerequisites
 
-- Python 3.11+
-- Ollama running locally at `http://localhost:11434`
-- A local model pulled, e.g.:
+- Docker + Docker Compose, or Python 3.11+ for local run
+- Ollama running at `http://localhost:11434`
+- Model available locally:
 
 ```bash
 ollama pull llama3.2:latest
 ```
 
-## Run the API locally
+## Run With Docker Compose (Recommended)
+
+```bash
+docker compose up --build -d
+```
+
+Services:
+
+- FastAPI: `http://localhost:9000`
+- Plano model listener: `http://localhost:12000`
+
+## Run Locally (Without Docker)
+
+Terminal 1:
 
 ```bash
 chmod +x scripts/run_api.sh
 ./scripts/run_api.sh
 ```
 
-Server available at `http://localhost:9000`.
-
-## Endpoints
-
-### POST `/v1/anonymize`
-
-Anonymizes a text and stores the PII mapping in the session vault.
-
-### POST `/v1/deanonymize`
-
-Restores placeholders in a text using the session vault.
-
-### POST `/v1/chat-safe`
-
-Runs the full privacy-safe pipeline:
-- anonymize the input
-- call Ollama `/api/chat`
-- deanonymize the output
-
-### POST `/v1/presidio/anonymize`
-
-Comparison endpoint using Presidio (`<REDACTED>` replacement).
-
-## Quick demo
-
-```bash
-chmod +x scripts/demo.sh
-./scripts/demo.sh
-```
-
-## Using with Plano
-
-### Option A: Plano installed locally
+Terminal 2 (requires `planoai` installed):
 
 ```bash
 chmod +x scripts/run_plano.sh
 ./scripts/run_plano.sh
 ```
 
-Plano listener on `http://localhost:8001` with the `safe_chat_agent` routing to the web server on `:9000`.
+## Endpoints
 
-### Option B: Docker Compose
+Direct API endpoints (FastAPI):
+
+- `POST /v1/anonymize`
+- `POST /v1/deanonymize`
+- `POST /v1/chat-safe`
+- `POST /v1/presidio/anonymize`
+
+Plano filter endpoints (called by Plano, not by end users):
+
+- `POST /anonymize/{path}`
+- `POST /deanonymize/{path}`
+
+## Quick Demo (FastAPI Direct)
 
 ```bash
-docker compose up --build
+chmod +x scripts/demo.sh
+./scripts/demo.sh
 ```
 
-Starts:
-- FastAPI app on `:9000`
-- Plano on `:8001`
+The demo shows:
 
-## cURL example — `chat-safe`
+- anonymized input with typed placeholders
+- model output on placeholders
+- final deanonymized output
+
+## End-to-End Through Plano
 
 ```bash
-curl http://localhost:9000/v1/chat-safe \
+curl -s http://localhost:12000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "session_id": "test-1",
-    "model": "llama3.2:latest",
-    "message": "Hi, I am Mario Rossi, email mario.rossi@example.com"
-  }'
+    "model": "local/llama3.2",
+    "messages": [{
+      "role": "user",
+      "content": "Rewrite this reminder and keep contacts: email mario.rossi@example.com phone 3331234567"
+    }],
+    "stream": false
+  }' | jq .
 ```
-
-Response includes:
-- `anonymized_prompt`
-- `raw_model_output`
-- `final_output` (deanonymized)
 
 ## Notes
 
-- LLM Guard downloads NER model assets on first run.
-- Presidio may require additional NLP dependencies depending on your configuration.
-- This PoC uses an in-memory vault (non-persistent). For production use a secure, encrypted storage backend.
+- No `llm-guard` dependency is used in this project.
+- Vault storage is in-memory and session-scoped.
+- For production, use encrypted persistent storage for mappings.
