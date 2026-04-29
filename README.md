@@ -112,6 +112,5 @@ curl -s http://localhost:12000/v1/chat/completions \
 
 ## Notes
 
-- No `llm-guard` dependency is used in this project.
 - Vault storage is in-memory and session-scoped.
 - For production, use encrypted persistent storage for mappings.
