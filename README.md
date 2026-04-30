@@ -1,47 +1,72 @@
 # Anonymizer PoC for LLM Calls (Plano + Ollama)
 
-A PoC that anonymizes PII before LLM calls and deanonymizes placeholders in the
-final response.
+A PoC that automatically anonymizes PII before LLM calls and deanonymizes
+placeholders in the final response. The agent sends requests through Plano's
+model-listener filter chain, which handles anonymization/deanonymization
+transparently.
 
-Current architecture:
+## Architecture
 
-1. Client sends a request to Plano (`:12000`)
-2. Plano input filter calls FastAPI `/anonymize/{path}`
-3. Plano forwards the sanitized request to Ollama
-4. Plano output filter calls FastAPI `/deanonymize/{path}`
-5. Client receives restored output
+```
+Client
+  └─► POST /v1/agent/chat  (FastAPI :9000)
+    └─► Plano :12000  (receives OpenAI-compatible request)
+              ├─ input filter → POST /anonymize/{path}  (FastAPI :9000)
+              │     └─ Presidio detects PII, replaces with placeholders, stores vault
+              ├─► Ollama :11434  (model inference on anonymized prompt)
+              └─ output filter → POST /deanonymize/{path}  (FastAPI :9000)
+                    └─ Vault looked up by request_id, placeholders restored
+        └─► Client receives original PII in response
+```
 
-FastAPI also exposes direct endpoints (`/v1/*`) for standalone testing.
+The **vault** is an in-memory map (`request_id → {placeholder: original_value}`)
+held in FastAPI and correlated via the `x-request-id` header / `user` field.
+
+### Gzip Buffering
+
+Ollama compresses HTTP responses with gzip (standard HTTP content-encoding).
+Plano forwards these bytes to the output filter, but splits the gzip stream over
+**two separate HTTP calls** — an incomplete chunk followed by the gzip footer
+(e.g. 229 bytes then 10 bytes). The deanonymize filter buffers the raw bytes and
+decompresses only once the complete stream is available, then re-compresses the
+modified response before returning it to Plano.
 
 ## Stack
 
-- FastAPI
-- Microsoft Presidio (`presidio-analyzer`, `presidio-anonymizer`)
-- spaCy `en_core_web_sm`
-- Ollama (`llama3.2:latest`)
-- Plano model listener with HTTP input/output filters
+- FastAPI + Uvicorn (port 9000)
+- Microsoft Presidio (`presidio-analyzer`) + spaCy `en_core_web_sm`
+- Plano model listener with HTTP input/output filters (port 12000)
+- Ollama (`llama3.2:latest`) on port 11434
+
+Detected PII entity types: `CREDIT_CARD`, `EMAIL_ADDRESS`, `IBAN_CODE`,
+`IP_ADDRESS`, `PERSON`, `PHONE_NUMBER`, `US_SSN`.
 
 ## Project Structure
 
-- `src/api/main.py`: API and filter endpoints
-- `src/common/vault_store.py`: in-memory session vault (placeholder <-> original)
-- `src/common/ollama_client.py`: Ollama HTTP client
-- `config/plano.yaml`: Plano model-listener config
-- `scripts/demo.sh`: direct FastAPI demo
-- `scripts/run_api.sh`: run FastAPI locally
-- `scripts/run_plano.sh`: run Plano locally (`planoai` required)
+```
+src/
+  api/main.py              # FastAPI app: agent endpoint + Plano filter endpoints
+  common/
+    vault_store.py         # In-memory vault (placeholder ↔ original value)
+    models.py              # Pydantic request/response models
+config/
+  plano.yaml               # Plano model-listener config (port 12000, filter chain)
+scripts/
+  demo.sh                  # End-to-end demo
+  run_api.sh               # Run FastAPI locally
+  run_plano.sh             # Run Plano locally (requires planoai)
+```
 
 ## Prerequisites
 
-- Docker + Docker Compose, or Python 3.11+ for local run
-- Ollama running at `http://localhost:11434`
-- Model available locally:
+- Docker + Docker Compose
+- Ollama running at `http://localhost:11434` with the model pulled:
 
 ```bash
 ollama pull llama3.2:latest
 ```
 
-## Run With Docker Compose (Recommended)
+## Run With Docker Compose
 
 ```bash
 docker compose up --build -d
@@ -49,68 +74,66 @@ docker compose up --build -d
 
 Services:
 
-- FastAPI: `http://localhost:9000`
-- Plano model listener: `http://localhost:12000`
-
-## Run Locally (Without Docker)
-
-Terminal 1:
-
-```bash
-chmod +x scripts/run_api.sh
-./scripts/run_api.sh
-```
-
-Terminal 2 (requires `planoai` installed):
-
-```bash
-chmod +x scripts/run_plano.sh
-./scripts/run_plano.sh
-```
+| Service | URL |
+|---------|-----|
+| FastAPI | `http://localhost:9000` |
+| Plano model listener | `http://localhost:12000` |
 
 ## Endpoints
 
-Direct API endpoints (FastAPI):
+### Agent Endpoint
 
-- `POST /v1/anonymize`
-- `POST /v1/deanonymize`
-- `POST /v1/chat-safe`
-- `POST /v1/presidio/anonymize`
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/agent/chat` | Agent → Plano filter chain → Ollama |
+| `GET` | `/health` | Health check |
 
-Plano filter endpoints (called by Plano, not by end users):
+### Plano Filter Endpoints (called by Plano internally)
 
-- `POST /anonymize/{path}`
-- `POST /deanonymize/{path}`
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/anonymize/{path}` | Input filter: anonymize user messages |
+| `POST` | `/deanonymize/{path}` | Output filter: restore placeholders in response |
 
-## Quick Demo (FastAPI Direct)
+### Request / Response
 
-```bash
-chmod +x scripts/demo.sh
-./scripts/demo.sh
+`POST /v1/agent/chat`
+
+```json
+// Request
+{
+  "session_id": "my-session-123",
+  "model": "local/llama3.2",
+  "message": "Contact mario.rossi@example.com or 3331234567 for info."
+}
+
+// Response
+{
+  "request_id": "my-session-123",
+  "model": "llama3.2",
+  "content": "You can reach out to mario.rossi@example.com or call 3331234567.",
+  "upstream": "http://plano:12000"
+}
 ```
 
-The demo shows:
+The model name sent to the agent endpoint must match the model configured in
+`config/plano.yaml` (`local/llama3.2`). Plano resolves `local/` to the Ollama
+provider.
 
-- anonymized input with typed placeholders
-- model output on placeholders
-- final deanonymized output
-
-## End-to-End Through Plano
+## Quick Test
 
 ```bash
-curl -s http://localhost:12000/v1/chat/completions \
+curl --max-time 60 -s http://localhost:9000/v1/agent/chat \
   -H "Content-Type: application/json" \
   -d '{
+    "session_id": "test-1",
     "model": "local/llama3.2",
-    "messages": [{
-      "role": "user",
-      "content": "Rewrite this reminder and keep contacts: email mario.rossi@example.com phone 3331234567"
-    }],
-    "stream": false
+    "message": "Please rewrite this reminder in a professional tone, keeping all contact details unchanged: Project kickoff is tomorrow at 10:00. Contact mario.rossi@example.com or 3331234567 for questions."
   }' | jq .
 ```
 
 ## Notes
 
-- Vault storage is in-memory and session-scoped.
-- For production, use encrypted persistent storage for mappings.
+- Vault storage is in-memory and process-scoped. Restarting FastAPI clears all vaults.
+- For production, replace the in-memory vault with encrypted persistent storage.
+- The system prompt injected by the agent instructs the LLM to treat placeholders as legitimate stand-ins and keep them intact in its response.

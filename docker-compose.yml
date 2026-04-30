@@ -7,6 +7,7 @@ services:
     environment:
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - DEFAULT_OLLAMA_MODEL=llama3.2:latest
+      - PLANO_BASE_URL=http://plano:12000
       - HOST=0.0.0.0
       - PORT=9000
     ports:

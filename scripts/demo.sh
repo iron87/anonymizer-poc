@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SESSION_ID="demo-session-1"
+SESSION_ID="demo-session-$(date +%s)"
 
-echo "1) Anonymize"
-curl -s http://localhost:9000/v1/anonymize \
+echo "Agent -> Plano -> filters -> LLM"
+curl --max-time 60 -s http://localhost:9000/v1/agent/chat \
   -H "Content-Type: application/json" \
   -d '{
     "session_id": "'"$SESSION_ID"'",
-    "text": "Please contact Mario Rossi at mario.rossi@example.com or 3331234567 regarding the project kickoff meeting."
-  }' | jq .
-
-echo "2) Safe chat"
-curl -s http://localhost:9000/v1/chat-safe \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "'"$SESSION_ID"'",
-    "model": "llama3.2:latest",
-    "message": "Rewrite this as a short professional reminder while keeping all contact details unchanged: contact Mario Rossi at mario.rossi@example.com or 3331234567 regarding the project kickoff meeting."
+    "model": "local/llama3.2",
+    "message": "Please rewrite this reminder in a professional tone and keep all contact details unchanged: Project kickoff is tomorrow at 10:00. Contact mario.rossi@example.com or 3331234567 for questions."
   }' | jq .
